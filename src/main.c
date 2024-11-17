@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MAX_NODES 8
+
 typedef struct {
   char *name;
   size_t name_length;
@@ -18,19 +20,37 @@ typedef struct {
   int valid;
 } DirectoryInfo;
 
+typedef struct Node Node;
+typedef struct Table Table;
+
+struct Node {
+  size_t key;
+  DirectoryInfo *info_ptr;
+  Node *next;
+};
+
+struct Table {
+  Node *table[MAX_NODES];
+};
+
 int rows, cols;
 int row_position, col_position;
-size_t traverse_position = 0;
+int current_node_key = 0;
 
+size_t hash(size_t key);
+int create_node(Table *ptr, size_t key);
+void table_set_buffer(Table *table, size_t key, DirectoryInfo *dbuf);
+Node *search_table(Table *ptr, size_t key);
 void err_callback(const char *prefix, const char *string);
 void print_callback(const char *prefix, const char *string);
 int no_hidden_path(const char *string);
 void list_draw(DirectoryInfo *buf, struct _win_st *win);
-int *position_clamp(int *pos, int max);
+const int *position_clamp(int *pos, int max);
 DirectoryInfo *search_directory(const char *path, const size_t path_len);
 void free_filesys_buffer(DirectoryInfo *buf, const int *ignore);
 
 int main(int argc, char **argv) {
+
   FILE *stderr_file = freopen("errlog.txt", "a", stderr);
   if (!stderr_file) {
     err_callback("freopen failed!", strerror(errno));
@@ -58,23 +78,36 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  const size_t max_panels = 32;
-  DirectoryInfo *traverse_buffer[max_panels];
-  memset(traverse_buffer, 0, sizeof(DirectoryInfo *) * max_panels);
+  Table *table = malloc(sizeof(Table) * MAX_NODES);
+  if (!table) {
+    err_callback("Could not allocate table!", strerror(errno));
+    return 1;
+  }
+
+  for (size_t i = 0; i < MAX_NODES; i++) {
+    table->table[i] = NULL;
+    if (!create_node(table, i)) {
+      return 1;
+    }
+  }
 
   snprintf(search_buffer, search_path_length + 1, "%s/%s", home, "Music");
-  traverse_buffer[0] = search_directory(search_buffer, search_path_length);
-  if (!traverse_buffer[0]) {
+
+  DirectoryInfo *tmp_dbuf = NULL;
+  tmp_dbuf = search_directory(search_buffer, search_path_length);
+  if (!tmp_dbuf) {
     err_callback("Failed to read directories! (LAST ERR)", strerror(errno));
     return 1;
   }
+
+  table_set_buffer(table, current_node_key, tmp_dbuf);
 
   free(search_buffer);
   search_buffer = NULL;
 
   // expands to row = getmaxy, col = getmaxx()
   getmaxyx(win, rows, cols);
-  list_draw(traverse_buffer[0], win);
+  list_draw(search_table(table, current_node_key)->info_ptr, win);
   move(0, 0);
 
   int running = 1;
@@ -87,7 +120,7 @@ int main(int argc, char **argv) {
     } break;
 
     case ' ': {
-      switch (traverse_buffer[traverse_position][row_position].type) {
+      switch (search_table(table, current_node_key)->info_ptr->type) {
       default:
         break;
 
@@ -103,15 +136,17 @@ int main(int argc, char **argv) {
 
     case KEY_UP: {
       row_position--;
-      move(*position_clamp(&row_position,
-                           traverse_buffer[traverse_position]->total_size),
+      move(*position_clamp(
+               &row_position,
+               search_table(table, current_node_key)->info_ptr->total_size),
            col_position);
     } break;
 
     case KEY_DOWN: {
       row_position++;
-      move(*position_clamp(&row_position,
-                           traverse_buffer[traverse_position]->total_size),
+      move(*position_clamp(
+               &row_position,
+               search_table(table, current_node_key)->info_ptr->total_size),
            col_position);
     } break;
     }
@@ -127,7 +162,7 @@ int main(int argc, char **argv) {
   return 0;
 }
 
-int *position_clamp(int *pos, int max) {
+const int *position_clamp(int *pos, int max) {
   if (*pos > max - 1) {
     *pos = 0;
     return pos;
@@ -269,10 +304,45 @@ int no_hidden_path(const char *string) {
   return 1;
 }
 
+Node *search_table(Table *ptr, size_t key) {
+  Node *node = ptr->table[hash(key)];
+  while (node != NULL) {
+    if (node->key == hash(key)) {
+      return node;
+    }
+
+    node = node->next;
+  }
+
+  return NULL;
+}
+
+int create_node(Table *ptr, size_t key) {
+  Node *node = malloc(sizeof(Node));
+  if (!node) {
+    err_callback("Failed to allocate node!", strerror(errno));
+    return false;
+  }
+
+  node->key = hash(key);
+  node->info_ptr = NULL;
+  node->next = ptr->table[node->key];
+  ptr->table[node->key] = node;
+
+  return true;
+}
+
 void err_callback(const char *prefix, const char *string) {
   fprintf(stderr, "%s -> %s\n", prefix, string);
 }
 
 void print_callback(const char *prefix, const char *string) {
   fprintf(stdout, "%s -> %s\n", prefix, string);
+}
+
+size_t hash(size_t key) { return key % MAX_NODES; }
+
+void table_set_buffer(Table *table, size_t key, DirectoryInfo *dbuf) {
+  Node *node = search_table(table, key);
+  node->info_ptr = dbuf;
 }
