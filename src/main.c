@@ -37,7 +37,6 @@ struct Table {
 int rows, cols;
 int rows_limit;
 int row_position = 0, col_position = 0;
-int buffer_pos = 0;
 int current_node_key = 0;
 
 size_t hash(size_t key);
@@ -76,6 +75,13 @@ int main(int argc, char **argv) {
   raw();
   keypad(win, TRUE);
   noecho();
+  if (!has_colors()) {
+    err_callback("Your terminal does not support colors!", "(no error)");
+    endwin();
+    return 1;
+  }
+  start_color();
+  use_default_colors();
 
   size_t search_path_length = strlen(home) + strlen("Music") + strlen("/");
   char *search_buffer = malloc(search_path_length + 1);
@@ -103,16 +109,12 @@ int main(int argc, char **argv) {
 
   free(search_buffer);
   search_buffer = NULL;
-
   // expands to row = getmaxy, col = getmaxx()
-  getmaxyx(win, rows, cols);
-  list_draw(search_table(table, current_node_key)->info_ptr);
-  move(0, 0);
 
   int running = 1;
   while (running) {
-
     getmaxyx(win, rows, cols);
+    clear();
     rows_limit = rows * 0.75;
 
     Node *current_node = search_table(table, current_node_key);
@@ -123,7 +125,9 @@ int main(int argc, char **argv) {
     }
 
     list_draw(current_node->info_ptr);
-    move(row_position, col_position);
+    int cursor_pos = row_position;
+    move(*position_clamp(&cursor_pos, rows_limit), col_position);
+    refresh();
 
     const int ch = getch();
 
@@ -146,8 +150,8 @@ int main(int argc, char **argv) {
         Node *current = search_table(table, current_node_key);
         // I don't need to worry about accessing outside bounds here since the
         // row_position index is always clamped to the size of the buffer.
-        search_buffer = current->info_ptr[buffer_pos].path_str;
-        const size_t length = current->info_ptr[buffer_pos].path_length;
+        search_buffer = current->info_ptr[row_position].path_str;
+        const size_t length = current->info_ptr[row_position].path_length;
 
         current_node_key++;
         position_clamp(&current_node_key, MAX_NODES);
@@ -156,7 +160,6 @@ int main(int argc, char **argv) {
           table_set_buffer(table, current_node_key,
                            search_directory(search_buffer, length));
           row_position = 0;
-          buffer_pos = 0;
         }
       } break;
       }
@@ -169,7 +172,6 @@ int main(int argc, char **argv) {
 
       if (search_table(table, current_node_key)->info_ptr != NULL) {
         row_position = 0;
-        buffer_pos = 0;
       } else {
         current_node_key = tmp_key;
       }
@@ -182,7 +184,6 @@ int main(int argc, char **argv) {
 
       if (search_table(table, current_node_key)->info_ptr != NULL) {
         row_position = 0;
-        buffer_pos = 0;
       } else {
         current_node_key = tmp_key;
       }
@@ -190,24 +191,18 @@ int main(int argc, char **argv) {
 
     case KEY_UP: {
       row_position--;
-      buffer_pos--;
-      position_clamp(&row_position, rows_limit);
       position_clamp(
-          &buffer_pos,
+          &row_position,
           search_table(table, current_node_key)->info_ptr->total_size);
     } break;
 
     case KEY_DOWN: {
       row_position++;
-      buffer_pos++;
-      position_clamp(&row_position, rows_limit);
       position_clamp(
-          &buffer_pos,
+          &row_position,
           search_table(table, current_node_key)->info_ptr->total_size);
     } break;
     }
-
-    refresh();
   }
 
   if (stderr_file) {
@@ -247,15 +242,13 @@ void elipsize(char *elipsis_buffer, const char *original, size_t max_size) {
 }
 
 void list_draw(DirectoryInfo *buf) {
-
-  clear();
   if (buf && buf->total_size == 0) {
     return;
   }
 
   int j = 0;
-  if (buffer_pos >= rows_limit) {
-    j = buffer_pos - (rows_limit - 1);
+  if (row_position >= rows_limit) {
+    j = row_position - (rows_limit - 1);
   }
 
   const int left = cols - (cols - 2);
@@ -276,7 +269,7 @@ void list_draw(DirectoryInfo *buf) {
     }
   }
 
-  mvprintw(rows - (rows * 0.1), left, "%d/%zu", buffer_pos + 1,
+  mvprintw(rows - (rows * 0.1), left, "%d/%zu", row_position + 1,
            buf->total_size);
 }
 
