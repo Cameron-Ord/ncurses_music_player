@@ -56,6 +56,8 @@ int main(int argc, char **argv) {
     err_callback("freopen failed!", strerror(errno));
   }
 
+  err_callback("Errlog initialized!", "no error");
+
   char *home = getenv("HOME");
   if (!home) {
     return 1;
@@ -124,15 +126,15 @@ int main(int argc, char **argv) {
       case DT_DIR: {
 
         Node *current = search_table(table, current_node_key);
+        // I don't need to worry about accessing outside bounds here since the
+        // row_position index is always clamped to the size of the buffer.
         search_buffer = current->info_ptr[row_position].path_str;
         const size_t length = current->info_ptr[row_position].path_length;
-
         current_node_key++;
         position_clamp(&current_node_key, MAX_NODES);
-
         table_set_buffer(table, current_node_key,
                          search_directory(search_buffer, length));
-
+        list_draw(search_table(table, current_node_key)->info_ptr, win);
       } break;
       }
     } break;
@@ -217,15 +219,19 @@ DirectoryInfo *search_directory(const char *search_path,
     if (no_hidden_path(entry->d_name)) {
       if (accumulator >= default_size) {
         size_t size_replace = default_size * 2;
-        DirectoryInfo *tmp_ptr = realloc(buf, size_replace);
+        DirectoryInfo *tmp_ptr =
+            realloc(buf, size_replace * sizeof(DirectoryInfo));
         if (!tmp_ptr) {
           // sets the first index of the allocated struct buffer to a bad valid
           // value for checks. if the first one is listed as invalid, then we
           // know shits fucked even if the following ones are "valid".
+          err_callback("Realloc failed!", strerror(errno));
           buf->valid = 0;
           return buf;
         }
+
         default_size = size_replace;
+        buf = tmp_ptr;
       }
 
       buf[accumulator].type = entry->d_type;
