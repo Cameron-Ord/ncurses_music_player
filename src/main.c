@@ -1,6 +1,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <ncurses.h>
+#include <pipewire/pipewire.h>
+#include <sndfile.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,8 +122,8 @@ int main(int argc, char **argv) {
     Node *current_node = search_table(table, current_node_key);
     const size_t list_size = current_node->info_ptr->total_size;
 
-    if (rows_limit > list_size) {
-      rows_limit = list_size;
+    if (rows_limit > (int)list_size) {
+      rows_limit = (int)list_size;
     }
 
     list_draw(current_node->info_ptr);
