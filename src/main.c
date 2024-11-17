@@ -92,15 +92,8 @@ int main(int argc, char **argv) {
   }
 
   snprintf(search_buffer, search_path_length + 1, "%s/%s", home, "Music");
-
-  DirectoryInfo *tmp_dbuf = NULL;
-  tmp_dbuf = search_directory(search_buffer, search_path_length);
-  if (!tmp_dbuf) {
-    err_callback("Failed to read directories! (LAST ERR)", strerror(errno));
-    return 1;
-  }
-
-  table_set_buffer(table, current_node_key, tmp_dbuf);
+  table_set_buffer(table, current_node_key,
+                   search_directory(search_buffer, search_path_length));
 
   free(search_buffer);
   search_buffer = NULL;
@@ -129,6 +122,16 @@ int main(int argc, char **argv) {
       } break;
 
       case DT_DIR: {
+
+        Node *current = search_table(table, current_node_key);
+        search_buffer = current->info_ptr[row_position].path_str;
+        const size_t length = current->info_ptr[row_position].path_length;
+
+        current_node_key++;
+        position_clamp(&current_node_key, MAX_NODES);
+
+        table_set_buffer(table, current_node_key,
+                         search_directory(search_buffer, length));
 
       } break;
       }
