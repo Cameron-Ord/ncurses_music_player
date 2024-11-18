@@ -98,9 +98,7 @@ void free_filesys_buffer(DirectoryInfo *buf);
 
 void fill_f32(PwData *d, void *dest, int n_frames) {
   float *dst = dest;
-  float val;
-
-  int i, c;
+  int i;
 
   switch (d->a->channels) {
   default:
@@ -115,8 +113,8 @@ void fill_f32(PwData *d, void *dest, int n_frames) {
 
   case 2: {
     for (i = 0; i < n_frames; i++) {
-      int left = i * 2 + d->a->position;
-      int right = i * 2 + d->a->position;
+      size_t left = (size_t)(i * 2 + d->a->position);
+      size_t right = (size_t)(i * 2 + d->a->position);
 
       if (left < d->a->samples && right < d->a->samples) {
         *dst++ = d->a->buffer[left];
@@ -205,10 +203,9 @@ int main(int argc, char **argv) {
     return 1;
   }
   start_color();
-  use_default_colors();
+
   init_pair(1, COLOR_RED, COLOR_BLACK);
-  // bkgd(COLOR_PAIR(1));
-  refresh();
+  init_pair(2, COLOR_WHITE, COLOR_BLACK);
 
   AudioData audio_data;
   PlainOldData pod = {0};
@@ -261,9 +258,10 @@ int main(int argc, char **argv) {
     }
 
     clear();
-    //   attron(COLOR_PAIR(1));
+    bkgd(COLOR_PAIR(2));
+    attron(COLOR_PAIR(1));
     list_draw(current_node->info_ptr);
-    //  attroff(COLOR_PAIR(1));
+    attroff(COLOR_PAIR(1));
     refresh();
 
     int cursor_pos = row_position;
@@ -447,7 +445,6 @@ DirectoryInfo *search_directory(const char *search_path,
   }
 
   buf->total_size = 0;
-  int written = 0;
 
   DIR *dir = opendir(search_path);
   if (!dir) {
