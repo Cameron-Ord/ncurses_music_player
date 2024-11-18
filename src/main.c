@@ -22,6 +22,7 @@ typedef struct {
 typedef struct {
   char *name;
   size_t name_length;
+  int display_len;
   char *path_str;
   size_t path_length;
   size_t index;
@@ -114,8 +115,15 @@ void fill_f32(PwData *d, void *dest, int n_frames) {
 
   case 2: {
     for (i = 0; i < n_frames; i++) {
-      *dst++ = d->a->buffer[i * 2 + d->a->position];
-      *dst++ = d->a->buffer[i * 2 + 1 + d->a->position];
+      int left = i * 2 + d->a->position;
+      int right = i * 2 + d->a->position;
+
+      if (left < d->a->samples && right < d->a->samples) {
+        *dst++ = d->a->buffer[left];
+        *dst++ = d->a->buffer[right];
+      } else {
+        return;
+      }
     }
 
   } break;
@@ -147,14 +155,12 @@ static void on_process(void *userdata) {
   if (b->requested)
     n_frames = SPA_MIN((int)b->requested, n_frames);
 
-  fill_f32(data, p, n_frames);
-
   size_t copy = n_frames * data->a->channels;
   if (data->a->position + copy >= data->a->samples) {
     copy = data->a->samples - data->a->position;
   }
 
-  fprintf(stderr, "%zu\n", copy);
+  fill_f32(data, p, n_frames);
   data->a->position += copy;
 
   buf->datas[0].chunk->offset = 0;
@@ -261,7 +267,8 @@ int main(int argc, char **argv) {
     refresh();
 
     int cursor_pos = row_position;
-    move(*position_clamp(&cursor_pos, rows_limit), col_position);
+    move(*position_clamp(&cursor_pos, rows_limit),
+         current_node->info_ptr[row_position].display_len);
     const int ch = getch();
 
     switch (ch) {
@@ -395,6 +402,7 @@ int list_draw(DirectoryInfo *buf) {
 
   for (int i = j, k = 0; i < (int)buf->total_size && k < rows_limit; i++, k++) {
     const char *name = buf[i].name;
+    int *display_len = &buf[i].display_len;
     const size_t name_length = buf[i].name_length;
     if (name) {
       char *display_buffer = malloc(name_length + 1);
@@ -410,17 +418,15 @@ int list_draw(DirectoryInfo *buf) {
       }
 
       display_buffer[iter] = '\0';
-      force_ascii(display_buffer);
-      const size_t string_size = strlen(display_buffer);
 
-      if ((int)string_size >= (cols * 0.95)) {
-        size_t reduced_size = (size_t)(cols * 0.95) - 1;
-        display_buffer[reduced_size++] = '~';
-        display_buffer[reduced_size++] = '\0';
+      if (iter >= (cols * 0.95)) {
+        iter = (size_t)(cols * 0.95) - 1;
+        display_buffer[iter] = '~';
+        display_buffer[iter++] = '\0';
       }
+      *display_len = left + iter;
 
       mvprintw(k, left, "%s", display_buffer);
-
       free(display_buffer);
     }
   }
