@@ -1,13 +1,22 @@
 #include <dirent.h>
 #include <errno.h>
 #include <ncurses.h>
+#include <pipewire-0.3/pipewire/log.h>
 #include <pipewire/pipewire.h>
+#include <pthread.h>
 #include <sndfile.h>
+#include <spa/param/audio/format-utils.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MAX_NODES 64
+
+typedef struct {
+  const struct spa_pod *params[1];
+  uint8_t buffer[1024];
+  struct spa_pod_builder b;
+} PlainOldData;
 
 typedef struct {
   char *name;
@@ -23,7 +32,7 @@ typedef struct {
 } DirectoryInfo;
 
 typedef struct {
-  int16_t *buffer;
+  float *buffer;
   uint32_t length;
   uint32_t position;
   size_t samples;
@@ -34,6 +43,15 @@ typedef struct {
   int format;
   float volume;
 } AudioData;
+
+typedef struct {
+  pthread_t thread;
+  struct pw_main_loop *loop;
+  struct pw_stream *stream;
+  double accumulator;
+  AudioData *a;
+  PlainOldData *pod;
+} PwData;
 
 typedef struct Node Node;
 typedef struct Table Table;
@@ -53,11 +71,12 @@ int rows_limit;
 int row_position = 0, col_position = 0;
 int current_node_key = 0;
 
+void stream_init(PwData *p);
 size_t hash(size_t key);
 void zero_data(AudioData *a);
 void data_set(AudioData *a, const SF_INFO *sfinfo);
 int read_audio_file(AudioData *a, const char *path);
-// I will implement wide chars later. just gotta get the program's skeleton
+// I will implement ide chars later. just gotta get the program's skeleton
 // finished so im forcing ascii for files right now
 const char *force_ascii(char *string);
 int check_range(int c);
@@ -74,6 +93,52 @@ const int *position_clamp(int *pos, int max);
 DirectoryInfo *search_directory(const char *path, const size_t path_len);
 void free_filesys_buffer(DirectoryInfo *buf);
 
+void fill_f32(PwData *d, void *dest, int n_frames) {
+  float *dst = dest;
+  float val;
+
+  int i, c;
+  for (i = 0; i < n_frames; i++) {
+    *dst++ = d->a->buffer[i * 2 + d->a->position];
+    *dst++ = d->a->buffer[i * 2 + 1 + d->a->position];
+  }
+}
+
+static void on_process(void *userdata) {
+  PwData *data = userdata;
+  struct pw_buffer *b;
+  struct spa_buffer *buf;
+  int n_frames, stride;
+  uint8_t *p;
+
+  if ((b = pw_stream_dequeue_buffer(data->stream)) == NULL) {
+    return;
+  }
+
+  buf = b->buffer;
+  if ((p = buf->datas[0].data) == NULL)
+    return;
+
+  stride = sizeof(float) * data->a->channels;
+  n_frames = buf->datas[0].maxsize / stride;
+  if (b->requested)
+    n_frames = SPA_MIN((int)b->requested, n_frames);
+
+  fill_f32(data, p, n_frames);
+  data->a->position += n_frames * data->a->channels;
+
+  buf->datas[0].chunk->offset = 0;
+  buf->datas[0].chunk->stride = stride;
+  buf->datas[0].chunk->size = n_frames * stride;
+
+  pw_stream_queue_buffer(data->stream, b);
+}
+
+static const struct pw_stream_events stream_events = {
+    PW_VERSION_STREAM_EVENTS,
+    .process = on_process,
+};
+
 int main(int argc, char **argv) {
   FILE *stderr_file = freopen("errlog.txt", "a", stderr);
   if (!stderr_file) {
@@ -81,6 +146,7 @@ int main(int argc, char **argv) {
   }
 
   err_callback("Errlog initialized!", "no error");
+  pw_init(NULL, NULL);
 
   char *home = getenv("HOME");
   if (!home) {
@@ -106,7 +172,12 @@ int main(int argc, char **argv) {
   use_default_colors();
 
   AudioData audio_data;
+  PlainOldData pod = {0};
+  PwData pw_data = {0};
   zero_data(&audio_data);
+
+  pw_data.a = &audio_data;
+  pw_data.pod = &pod;
 
   size_t search_path_length = strlen(home) + strlen("Music") + strlen("/");
   char *search_buffer = malloc(search_path_length + 1);
@@ -171,7 +242,7 @@ int main(int argc, char **argv) {
       case DT_REG: {
         search_buffer = current_node->info_ptr[row_position].path_str;
         read_audio_file(&audio_data, search_buffer);
-
+        stream_init(&pw_data);
       } break;
 
       case DT_DIR: {
@@ -526,7 +597,7 @@ void data_set(AudioData *a, const SF_INFO *sfinfo) {
   a->SR = sfinfo->samplerate;
   a->frames = sfinfo->frames;
   a->samples = a->frames * a->channels;
-  a->bytes = a->samples * sizeof(uint16_t);
+  a->bytes = a->samples * sizeof(float);
 }
 
 int read_audio_file(AudioData *a, const char *path) {
@@ -552,7 +623,7 @@ int read_audio_file(AudioData *a, const char *path) {
     return -1;
   }
 
-  sf_count_t read = sf_read_short(sndfile, a->buffer, a->samples);
+  sf_count_t read = sf_read_float(sndfile, a->buffer, a->samples);
   if (read <= 0) {
     err_callback("Failed to read audio data!", sf_strerror(sndfile));
     free(a->buffer);
@@ -563,4 +634,38 @@ int read_audio_file(AudioData *a, const char *path) {
 
   sf_close(sndfile);
   return 1;
+}
+
+void *audio_thread(void *p) {
+  PwData *ptr = p;
+  pw_main_loop_run(ptr->loop);
+  pw_stream_destroy(ptr->stream);
+  pw_main_loop_destroy(ptr->loop);
+  return NULL;
+}
+
+void stream_init(PwData *p) {
+  p->pod->b = SPA_POD_BUILDER_INIT(p->pod->buffer, sizeof(p->pod->buffer));
+
+  p->loop = pw_main_loop_new(NULL);
+
+  p->stream = pw_stream_new_simple(
+      pw_main_loop_get_loop(p->loop), "audio-src",
+      pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
+                        "Playback", PW_KEY_MEDIA_ROLE, "Music", NULL),
+      &stream_events, p);
+
+  p->pod->params[0] = spa_format_audio_raw_build(
+      &p->pod->b, SPA_PARAM_EnumFormat,
+      &SPA_AUDIO_INFO_RAW_INIT(.format = SPA_AUDIO_FORMAT_F32,
+                               .channels = p->a->channels, .rate = p->a->SR));
+
+  pw_stream_connect(p->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
+                    PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
+                        PW_STREAM_FLAG_RT_PROCESS,
+                    p->pod->params, 1);
+
+  pthread_t thread;
+  pthread_create(&thread, NULL, audio_thread, p);
+  pthread_detach(thread);
 }
