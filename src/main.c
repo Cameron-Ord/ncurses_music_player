@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define MAX_NODES 64
 
@@ -22,6 +21,19 @@ typedef struct {
   size_t total_size;
   int valid;
 } DirectoryInfo;
+
+typedef struct {
+  int16_t *buffer;
+  uint32_t length;
+  uint32_t position;
+  size_t samples;
+  size_t bytes;
+  size_t frames;
+  int channels;
+  int SR;
+  int format;
+  float volume;
+} AudioData;
 
 typedef struct Node Node;
 typedef struct Table Table;
@@ -42,6 +54,13 @@ int row_position = 0, col_position = 0;
 int current_node_key = 0;
 
 size_t hash(size_t key);
+void zero_data(AudioData *a);
+void data_set(AudioData *a, const SF_INFO *sfinfo);
+int read_audio_file(AudioData *a, const char *path);
+// I will implement wide chars later. just gotta get the program's skeleton
+// finished so im forcing ascii for files right now
+const char *force_ascii(char *string);
+int check_range(int c);
 void elipsize(char *elipsis_buf, const char *original, const size_t max_size);
 const char *type_to_string(unsigned char type);
 int create_node(Table *ptr, size_t key);
@@ -50,7 +69,7 @@ Node *search_table(Table *ptr, size_t key);
 void err_callback(const char *prefix, const char *string);
 void print_callback(const char *prefix, const char *string);
 int no_hidden_path(const char *string);
-void list_draw(DirectoryInfo *buf);
+int list_draw(DirectoryInfo *buf);
 const int *position_clamp(int *pos, int max);
 DirectoryInfo *search_directory(const char *path, const size_t path_len);
 void free_filesys_buffer(DirectoryInfo *buf);
@@ -77,6 +96,7 @@ int main(int argc, char **argv) {
   raw();
   keypad(win, TRUE);
   noecho();
+
   if (!has_colors()) {
     err_callback("Your terminal does not support colors!", "(no error)");
     endwin();
@@ -84,6 +104,9 @@ int main(int argc, char **argv) {
   }
   start_color();
   use_default_colors();
+
+  AudioData audio_data;
+  zero_data(&audio_data);
 
   size_t search_path_length = strlen(home) + strlen("Music") + strlen("/");
   char *search_buffer = malloc(search_path_length + 1);
@@ -119,6 +142,7 @@ int main(int argc, char **argv) {
     clear();
     rows_limit = rows * 0.75;
 
+    position_clamp(&current_node_key, MAX_NODES);
     Node *current_node = search_table(table, current_node_key);
     const size_t list_size = current_node->info_ptr->total_size;
 
@@ -140,27 +164,30 @@ int main(int argc, char **argv) {
     } break;
 
     case ' ': {
-      switch (search_table(table, current_node_key)->info_ptr->type) {
+      switch (current_node->info_ptr->type) {
       default:
         break;
 
       case DT_REG: {
+        search_buffer = current_node->info_ptr[row_position].path_str;
+        read_audio_file(&audio_data, search_buffer);
 
       } break;
 
       case DT_DIR: {
-        Node *current = search_table(table, current_node_key);
         // I don't need to worry about accessing outside bounds here since the
         // row_position index is always clamped to the size of the buffer.
-        search_buffer = current->info_ptr[row_position].path_str;
-        const size_t length = current->info_ptr[row_position].path_length;
+        search_buffer = current_node->info_ptr[row_position].path_str;
+        const size_t plength = current_node->info_ptr[row_position].path_length;
 
         current_node_key++;
         position_clamp(&current_node_key, MAX_NODES);
         if (current_node_key != 0) {
-          free_filesys_buffer(search_table(table, current_node_key)->info_ptr);
-          table_set_buffer(table, current_node_key,
-                           search_directory(search_buffer, length));
+          Node *next_node = search_table(table, current_node_key);
+          DirectoryInfo *dbuf = search_directory(search_buffer, plength);
+          search_buffer = NULL;
+          free_filesys_buffer(next_node->info_ptr);
+          table_set_buffer(table, current_node_key, dbuf);
           row_position = 0;
         }
       } break;
@@ -171,8 +198,9 @@ int main(int argc, char **argv) {
       const int tmp_key = current_node_key;
       current_node_key--;
       position_clamp(&current_node_key, MAX_NODES);
+      Node *next_node = search_table(table, current_node_key);
 
-      if (search_table(table, current_node_key)->info_ptr != NULL) {
+      if (next_node->info_ptr != NULL) {
         row_position = 0;
       } else {
         current_node_key = tmp_key;
@@ -183,8 +211,9 @@ int main(int argc, char **argv) {
       const int tmp_key = current_node_key;
       current_node_key++;
       position_clamp(&current_node_key, MAX_NODES);
+      Node *next_node = search_table(table, current_node_key);
 
-      if (search_table(table, current_node_key)->info_ptr != NULL) {
+      if (next_node->info_ptr != NULL) {
         row_position = 0;
       } else {
         current_node_key = tmp_key;
@@ -193,16 +222,12 @@ int main(int argc, char **argv) {
 
     case KEY_UP: {
       row_position--;
-      position_clamp(
-          &row_position,
-          search_table(table, current_node_key)->info_ptr->total_size);
+      position_clamp(&row_position, current_node->info_ptr->total_size);
     } break;
 
     case KEY_DOWN: {
       row_position++;
-      position_clamp(
-          &row_position,
-          search_table(table, current_node_key)->info_ptr->total_size);
+      position_clamp(&row_position, current_node->info_ptr->total_size);
     } break;
     }
   }
@@ -243,9 +268,9 @@ void elipsize(char *elipsis_buffer, const char *original, size_t max_size) {
   elipsis_buffer[max_size] = '\0';
 }
 
-void list_draw(DirectoryInfo *buf) {
+int list_draw(DirectoryInfo *buf) {
   if (buf && buf->total_size == 0) {
-    return;
+    return -1;
   }
 
   int j = 0;
@@ -256,23 +281,41 @@ void list_draw(DirectoryInfo *buf) {
   const int left = cols - (cols - 2);
 
   for (int i = j, k = 0; i < (int)buf->total_size && k < rows_limit; i++, k++) {
-    if (buf[i].name) {
-      const size_t max_size = 50;
-      char *name_ptr = NULL;
-      if (strlen(buf[i].name) >= max_size) {
-        char tmp_name_buf[max_size * 2];
-        elipsize(tmp_name_buf, buf[i].name, max_size);
-        name_ptr = tmp_name_buf;
-      } else {
-        name_ptr = buf[i].name;
+    const char *name = buf[i].name;
+    const size_t name_length = buf[i].name_length;
+    if (name) {
+      char *display_buffer = malloc(name_length + 1);
+      if (!display_buffer) {
+        err_callback("Failed to allocate memory!", strerror(errno));
+        return -1;
       }
 
-      mvprintw(k, left, "%s - (%s)", name_ptr, type_to_string(buf[i].type));
+      int iter = 0;
+      while (buf[i].name[iter] != '\0') {
+        display_buffer[iter] = name[iter];
+        iter++;
+      }
+
+      display_buffer[iter] = '\0';
+      force_ascii(display_buffer);
+      const size_t string_size = strlen(display_buffer);
+
+      if ((int)string_size >= (cols * 0.95)) {
+        size_t reduced_size = (size_t)(cols * 0.95) - 1;
+        display_buffer[reduced_size++] = '~';
+        display_buffer[reduced_size++] = '\0';
+      }
+
+      mvprintw(k, left, "%s", display_buffer);
+
+      free(display_buffer);
     }
   }
 
   mvprintw(rows - (rows * 0.1), left, "%d/%zu", row_position + 1,
            buf->total_size);
+
+  return 1;
 }
 
 DirectoryInfo *search_directory(const char *search_path,
@@ -341,10 +384,17 @@ DirectoryInfo *search_directory(const char *search_path,
       }
 
       char tmp_buffer[combined_path_len + 1];
+      char conv_buffer[combined_path_len + 1];
+
       snprintf(tmp_buffer, combined_path_len + 1, "%s/%s", search_path,
                buf[accumulator].name);
 
-      strcpy(buf[accumulator].path_str, tmp_buffer);
+      snprintf(conv_buffer, combined_path_len + 1, "%s/%s", search_path,
+               buf[accumulator].name);
+
+      rename(tmp_buffer, force_ascii(conv_buffer));
+
+      strcpy(buf[accumulator].path_str, conv_buffer);
       buf[accumulator].path_length = combined_path_len;
 
       accumulator++;
@@ -444,4 +494,73 @@ const char *type_to_string(unsigned char type) {
     return "Directory";
   } break;
   }
+}
+
+int check_range(int c) { return c > 127; }
+
+const char *force_ascii(char *string) {
+  int i = 0;
+  while (string[i] != '\0') {
+    if (check_range(string[i])) {
+      string[i] = '~';
+    }
+    i++;
+  }
+  return string;
+}
+
+void zero_data(AudioData *a) {
+  a->format = 0;
+  a->SR = 0;
+  a->channels = 0;
+  a->bytes = 0;
+  a->samples = 0;
+  a->position = 0;
+  a->length = 0;
+  a->frames = 0;
+}
+
+void data_set(AudioData *a, const SF_INFO *sfinfo) {
+  a->format = sfinfo->format;
+  a->channels = sfinfo->channels;
+  a->SR = sfinfo->samplerate;
+  a->frames = sfinfo->frames;
+  a->samples = a->frames * a->channels;
+  a->bytes = a->samples * sizeof(uint16_t);
+}
+
+int read_audio_file(AudioData *a, const char *path) {
+  SNDFILE *sndfile = NULL;
+  SF_INFO sfinfo = {.frames = 0,
+                    .samplerate = 0,
+                    .channels = 0,
+                    .format = 0,
+                    .sections = 0,
+                    .seekable = 0};
+  zero_data(a);
+  sndfile = sf_open(path, SFM_READ, &sfinfo);
+  if (!sndfile) {
+    err_callback("Could not open file for reading!", strerror(errno));
+    return -1;
+  }
+
+  data_set(a, &sfinfo);
+  a->buffer = malloc(a->bytes);
+  if (!a->buffer) {
+    err_callback("Failed to allocate pointer!", strerror(errno));
+    sf_close(sndfile);
+    return -1;
+  }
+
+  sf_count_t read = sf_read_short(sndfile, a->buffer, a->samples);
+  if (read <= 0) {
+    err_callback("Failed to read audio data!", sf_strerror(sndfile));
+    free(a->buffer);
+    a->buffer = NULL;
+    sf_close(sndfile);
+    return -1;
+  }
+
+  sf_close(sndfile);
+  return 1;
 }
