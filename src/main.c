@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <ncurses.h>
 #include <pipewire-0.3/pipewire/log.h>
+#include <pipewire-0.3/pipewire/main-loop.h>
 #include <pipewire/pipewire.h>
 #include <pthread.h>
 #include <sndfile.h>
@@ -49,6 +50,7 @@ typedef struct {
   struct pw_main_loop *loop;
   struct pw_stream *stream;
   double accumulator;
+  int quit;
   AudioData *a;
   PlainOldData *pod;
 } PwData;
@@ -98,9 +100,25 @@ void fill_f32(PwData *d, void *dest, int n_frames) {
   float val;
 
   int i, c;
-  for (i = 0; i < n_frames; i++) {
-    *dst++ = d->a->buffer[i * 2 + d->a->position];
-    *dst++ = d->a->buffer[i * 2 + 1 + d->a->position];
+
+  switch (d->a->channels) {
+  default:
+    break;
+
+  case 1: {
+    for (i = 0; i < n_frames; i++) {
+      *dst++ = d->a->buffer[i + d->a->position];
+    }
+
+  } break;
+
+  case 2: {
+    for (i = 0; i < n_frames; i++) {
+      *dst++ = d->a->buffer[i * 2 + d->a->position];
+      *dst++ = d->a->buffer[i * 2 + 1 + d->a->position];
+    }
+
+  } break;
   }
 }
 
@@ -110,6 +128,11 @@ static void on_process(void *userdata) {
   struct spa_buffer *buf;
   int n_frames, stride;
   uint8_t *p;
+
+  if (data->quit || data->a->position >= data->a->samples) {
+    pw_main_loop_quit(data->loop);
+    return;
+  }
 
   if ((b = pw_stream_dequeue_buffer(data->stream)) == NULL) {
     return;
@@ -125,7 +148,14 @@ static void on_process(void *userdata) {
     n_frames = SPA_MIN((int)b->requested, n_frames);
 
   fill_f32(data, p, n_frames);
-  data->a->position += n_frames * data->a->channels;
+
+  size_t copy = n_frames * data->a->channels;
+  if (data->a->position + copy >= data->a->samples) {
+    copy = data->a->samples - data->a->position;
+  }
+
+  fprintf(stderr, "%zu\n", copy);
+  data->a->position += copy;
 
   buf->datas[0].chunk->offset = 0;
   buf->datas[0].chunk->stride = stride;
@@ -163,17 +193,21 @@ int main(int argc, char **argv) {
   keypad(win, TRUE);
   noecho();
 
-  if (!has_colors()) {
+  if (!has_colors() && !can_change_color()) {
     err_callback("Your terminal does not support colors!", "(no error)");
     endwin();
     return 1;
   }
   start_color();
   use_default_colors();
+  init_pair(1, COLOR_RED, COLOR_BLACK);
+  // bkgd(COLOR_PAIR(1));
+  refresh();
 
   AudioData audio_data;
   PlainOldData pod = {0};
   PwData pw_data = {0};
+  pw_data.quit = 1;
   zero_data(&audio_data);
 
   pw_data.a = &audio_data;
@@ -210,7 +244,6 @@ int main(int argc, char **argv) {
   int running = 1;
   while (running) {
     getmaxyx(win, rows, cols);
-    clear();
     rows_limit = rows * 0.75;
 
     position_clamp(&current_node_key, MAX_NODES);
@@ -221,11 +254,16 @@ int main(int argc, char **argv) {
       rows_limit = (int)list_size;
     }
 
+    clear();
+    //   attron(COLOR_PAIR(1));
     list_draw(current_node->info_ptr);
-    int cursor_pos = row_position;
-    move(*position_clamp(&cursor_pos, rows_limit), col_position);
+    move(30, 30);
+    printw("%d %zu", audio_data.channels, audio_data.samples);
+    //  attroff(COLOR_PAIR(1));
     refresh();
 
+    int cursor_pos = row_position;
+    move(*position_clamp(&cursor_pos, rows_limit), col_position);
     const int ch = getch();
 
     switch (ch) {
@@ -235,14 +273,20 @@ int main(int argc, char **argv) {
     } break;
 
     case ' ': {
-      switch (current_node->info_ptr->type) {
+      switch (current_node->info_ptr[row_position].type) {
       default:
         break;
 
       case DT_REG: {
+        if (!pw_data.quit) {
+          pw_data.quit = 1;
+          pthread_join(pw_data.thread, NULL);
+        }
+
         search_buffer = current_node->info_ptr[row_position].path_str;
-        read_audio_file(&audio_data, search_buffer);
-        stream_init(&pw_data);
+        if (read_audio_file(&audio_data, search_buffer)) {
+          stream_init(&pw_data);
+        }
       } break;
 
       case DT_DIR: {
@@ -587,7 +631,6 @@ void zero_data(AudioData *a) {
   a->bytes = 0;
   a->samples = 0;
   a->position = 0;
-  a->length = 0;
   a->frames = 0;
 }
 
@@ -612,6 +655,11 @@ int read_audio_file(AudioData *a, const char *path) {
   sndfile = sf_open(path, SFM_READ, &sfinfo);
   if (!sndfile) {
     err_callback("Could not open file for reading!", strerror(errno));
+    return -1;
+  }
+
+  if (sfinfo.channels != 2) {
+    err_callback("Must be a two channel audio file!", "");
     return -1;
   }
 
@@ -665,7 +713,7 @@ void stream_init(PwData *p) {
                         PW_STREAM_FLAG_RT_PROCESS,
                     p->pod->params, 1);
 
-  pthread_t thread;
-  pthread_create(&thread, NULL, audio_thread, p);
-  pthread_detach(thread);
+  p->quit = 0;
+
+  pthread_create(&p->thread, NULL, audio_thread, p);
 }
