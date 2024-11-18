@@ -257,8 +257,6 @@ int main(int argc, char **argv) {
     clear();
     //   attron(COLOR_PAIR(1));
     list_draw(current_node->info_ptr);
-    move(30, 30);
-    printw("%d %zu", audio_data.channels, audio_data.samples);
     //  attroff(COLOR_PAIR(1));
     refresh();
 
