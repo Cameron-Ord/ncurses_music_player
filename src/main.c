@@ -114,7 +114,7 @@ void fill_f32(PwData *d, void *dest, int n_frames) {
   case 2: {
     for (i = 0; i < n_frames; i++) {
       size_t left = (size_t)(i * 2 + d->a->position);
-      size_t right = (size_t)(i * 2 + d->a->position);
+      size_t right = (size_t)(i * 2 + 1 + d->a->position);
 
       if (left < d->a->samples && right < d->a->samples) {
         *dst++ = d->a->buffer[left];
